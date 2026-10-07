@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Generative Flow Field Particle System</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#000; color:#e2e8f0; font-family:system-ui,sans-serif; margin:0; }
+  #mainCanvas { display:block; }
+  .ctrl-panel { position:fixed; top:12px; right:12px; background:rgba(15,23,42,0.92); border:1px solid #334155; border-radius:14px; padding:14px; width:220px; backdrop-filter:blur(8px); z-index:10; }
+  label { font-size:11px; color:#94a3b8; display:block; margin-bottom:2px; }
+  input[type=range] { width:100%; accent-color:#818cf8; }
+  select { background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:3px 6px; font-size:12px; width:100%; }
+  .btn { background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:5px 10px; font-size:12px; cursor:pointer; transition:all 0.15s; width:100%; margin-top:4px; }
+  .btn:hover { background:#334155; }
+  .space-y-3 > * + * { margin-top:10px; }
+  input[type=color] { width:40px; height:28px; border:none; background:none; cursor:pointer; }
+</style>
+</head>
+<body>
+<canvas id="mainCanvas" aria-label="Generative flow field particle system animation"></canvas>
+
+<div class="ctrl-panel">
+  <div class="text-xs font-bold text-indigo-300 mb-3">🌊 Flow Field Controls</div>
+  <div class="space-y-3">
+    <div>
+      <label for="pCount">Particles: <span id="pCountVal">800</span></label>
+      <input type="range" id="pCount" min="100" max="2000" step="50" value="800" aria-label="Particle count">
+    </div>
+    <div>
+      <label for="trailLen">Trail Length: <span id="trailLenVal">40</span></label>
+      <input type="range" id="trailLen" min="10" max="100" step="5" value="40" aria-label="Trail length">
+    </div>
+    <div>
+      <label for="noiseScale">Noise Scale: <span id="noiseScaleVal">0.006</span></label>
+      <input type="range" id="noiseScale" min="1" max="20" step="1" value="6" aria-label="Noise scale">
+    </div>
+    <div>
+      <label for="evolSpeed">Evolution: <span id="evolSpeedVal">0.003</span></label>
+      <input type="range" id="evolSpeed" min="1" max="20" step="1" value="3" aria-label="Field evolution speed">
+    </div>
+    <div>
+      <label for="lineOp">Opacity: <span id="lineOpVal">0.06</span></label>
+      <input type="range" id="lineOp" min="1" max="20" step="1" value="6" aria-label="Line opacity">
+    </div>
+    <div>
+      <label for="bgColor">Background:</label>
+      <select id="bgColor" aria-label="Background color">
+        <option value="0,0,0">Black</option>
+        <option value="255,255,255">White</option>
+        <option value="13,17,38">Navy</option>
+        <option value="20,5,10">Deep Red</option>
+      </select>
+    </div>
+    <div>
+      <label for="preset">Preset:</label>
+      <select id="preset" aria-label="Flow field preset">
+        <option value="default">Default</option>
+        <option value="curl">Curl</option>
+        <option value="vortex">Vortex</option>
+        <option value="turbulence">Turbulence</option>
+      </select>
+    </div>
+    <button class="btn" onclick="clearCanvas()" aria-label="Clear canvas">🗑 Clear</button>
+    <button class="btn" onclick="snapshot()" aria-label="Download snapshot">📷 Snapshot</button>
+  </div>
+</div>
+
+<script>
+function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+const canvas = document.getElementById('mainCanvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); reinit(); });
+
+// --- Permutation table for noise ---
+let perm = [];
+(function initPerm() {
+  const p = Array.from({length:256},(_,i)=>i);
+  for (let i=255;i>0;i--){const j=Math.floor(Math.random()*(i+1));[p[i],p[j]]=[p[j],p[i]];}
+  perm = [...p,...p];
+})();
+
+function fade(t){return t*t*t*(t*(t*6-15)+10);}
+function lerp(a,b,t){return a+t*(b-a);}
+function grad2(h,x,y){h&=3;const u=h<2?x:y,v=h<2?y:x;return((h&1)?-u:u)+((h&2)?-v:v);}
+function noise2D(x,y){
+  const X=Math.floor(x)&255,Y=Math.floor(y)&255;
+  x-=Math.floor(x);y-=Math.floor(y);
+  const u=fade(x),v=fade(y);
+  const a=perm[X]+Y,b=perm[X+1]+Y;
+  return lerp(lerp(grad2(perm[a],x,y),grad2(perm[b],x-1,y),u),
+              lerp(grad2(perm[a+1],x,y-1),grad2(perm[b+1],x-1,y-1),u),v);
+}
+
+let params = {
+  pCount: 800, trailLen: 40, noiseScale: 0.006,
+  evolSpeed: 0.003, lineOp: 0.06, bgColor: '0,0,0', preset: 'default'
+};
+let particles = [];
+let t = 0;
+
+function fieldAngle(x, y) {
+  const ns = params.noiseScale;
+  switch (params.preset) {
+    case 'curl': {
+      const eps = 0.001;
+      const n0 = noise2D(x*ns, y*ns+t);
+      const n1 = noise2D(x*ns+eps, y*ns+t);
+      const n2 = noise2D(x*ns, y*ns+eps+t);
+      return Math.atan2(n2-n0, n1-n0) * 6;
+    }
+    case 'vortex': {
+      const cx=W/2, cy=H/2;
+      const dx=x-cx, dy=y-cy;
+      const baseAngle = Math.atan2(dy,dx)+Math.PI/2;
+      return baseAngle + noise2D(x*ns*0.5, y*ns*0.5+t)*0.8;
+    }
+    case 'turbulence': {
+      const n = noise2D(x*ns*3, y*ns*3+t*2) + noise2D(x*ns*6+100, y*ns*6+t*1.5)*0.5;
+      return n * Math.PI * 4;
+    }
+    default:
+      return noise2D(x*ns, y*ns+t) * Math.PI * 4;
+  }
+}
+
+function makeParticle() {
+  return { x: Math.random()*W, y: Math.random()*H, age: 0, maxAge: params.trailLen + Math.random()*params.trailLen };
+}
+
+function reinit() {
+  particles = Array.from({length: params.pCount}, makeParticle);
+}
+reinit();
+
+function clearCanvas() {
+  const [r,g,b] = params.bgColor.split(',');
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fillRect(0,0,W,H);
+}
+clearCanvas();
+
+let lastTs = null;
+function animate(ts) {
+  if (!lastTs) lastTs = ts;
+  lastTs = ts;
+
+  // Fade background
+  const [r,g,b] = params.bgColor.split(',');
+  ctx.fillStyle = `rgba(${r},${g},${b},0.04)`;
+  ctx.fillRect(0,0,W,H);
+
+  t += params.evolSpeed;
+
+  particles.forEach((p,idx) => {
+    const angle = fieldAngle(p.x, p.y);
+    const vx = Math.cos(angle)*2;
+    const vy = Math.sin(angle)*2;
+    const nx = p.x+vx, ny = p.y+vy;
+
+    const hue = (p.x/W*360 + p.y/H*60 + t*20) % 360;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(nx, ny);
+    ctx.strokeStyle = `hsla(${hue},85%,65%,${params.lineOp})`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    p.x = nx; p.y = ny; p.age++;
+    if (p.age > p.maxAge || p.x<0 || p.x>W || p.y<0 || p.y>H) {
+      particles[idx] = makeParticle();
+    }
+  });
+
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// Controls
+document.getElementById('pCount').addEventListener('input', function() {
+  params.pCount = parseInt(this.value);
+  document.getElementById('pCountVal').textContent = this.value;
+  reinit();
+});
+document.getElementById('trailLen').addEventListener('input', function() {
+  params.trailLen = parseInt(this.value);
+  document.getElementById('trailLenVal').textContent = this.value;
+});
+document.getElementById('noiseScale').addEventListener('input', function() {
+  params.noiseScale = parseInt(this.value)*0.001;
+  document.getElementById('noiseScaleVal').textContent = params.noiseScale.toFixed(3);
+});
+document.getElementById('evolSpeed').addEventListener('input', function() {
+  params.evolSpeed = parseInt(this.value)*0.001;
+  document.getElementById('evolSpeedVal').textContent = params.evolSpeed.toFixed(3);
+});
+document.getElementById('lineOp').addEventListener('input', function() {
+  params.lineOp = parseInt(this.value)*0.01;
+  document.getElementById('lineOpVal').textContent = params.lineOp.toFixed(2);
+});
+document.getElementById('bgColor').addEventListener('change', function() {
+  params.bgColor = this.value;
+  clearCanvas();
+});
+document.getElementById('preset').addEventListener('change', function() {
+  params.preset = this.value;
+});
+
+function snapshot() {
+  const a = document.createElement('a');
+  a.href = canvas.toDataURL('image/png');
+  a.download = 'flowfield.png';
+  a.click();
+}
+</script>
+</body>
+</html>

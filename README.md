@@ -1,0 +1,1 @@
+Full-screen generative art system using Perlin-like noise to drive a flow field for up to 2000 particles with rainbow trails, four preset styles (Default/Curl/Vortex/Turbulence), and PNG snapshot export.
